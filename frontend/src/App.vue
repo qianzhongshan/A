@@ -9,17 +9,59 @@
             进度: {{ progressPercent }}% ({{ answeredCount }}/{{ totalQuestions }})
           </span>
           <button
-            v-if="isAdminMode"
-            @click="goToAdmin"
+            @click="showApiSettings = !showApiSettings"
             class="text-sm bg-gray-100 hover:bg-gray-200 px-3 py-1 rounded"
           >
-            管理面板
+            设置
           </button>
         </div>
       </div>
     </header>
 
     <main class="max-w-4xl mx-auto px-4 py-8">
+      <!-- API设置面板 -->
+      <div v-if="showApiSettings" class="bg-white rounded-lg shadow-lg p-6 mb-6">
+        <h3 class="text-lg font-semibold mb-4">OpenAI API 设置</h3>
+        <div class="space-y-4">
+          <div>
+            <label class="block text-sm font-medium text-gray-700 mb-1">API Key</label>
+            <input
+              v-model="apiKey"
+              type="password"
+              placeholder="sk-..."
+              class="w-full p-2 border border-gray-300 rounded focus:ring-2 focus:ring-indigo-500"
+            />
+            <p class="text-xs text-gray-500 mt-1">请输入您的OpenAI或DeepSeek API密钥</p>
+          </div>
+          <div>
+            <label class="block text-sm font-medium text-gray-700 mb-1">API Base URL</label>
+            <input
+              v-model="apiBase"
+              type="text"
+              placeholder="https://api.openai.com/v1"
+              class="w-full p-2 border border-gray-300 rounded focus:ring-2 focus:ring-indigo-500"
+            />
+            <p class="text-xs text-gray-500 mt-1">默认: https://api.deepseek.com</p>
+          </div>
+          <div>
+            <label class="block text-sm font-medium text-gray-700 mb-1">Model</label>
+            <input
+              v-model="apiModel"
+              type="text"
+              placeholder="deepseek-chat"
+              class="w-full p-2 border border-gray-300 rounded focus:ring-2 focus:ring-indigo-500"
+            />
+            <p class="text-xs text-gray-500 mt-1">默认: deepseek-chat 或 gpt-4-turbo-preview</p>
+          </div>
+          <button
+            @click="saveApiSettings"
+            class="bg-indigo-600 hover:bg-indigo-700 text-white px-4 py-2 rounded"
+          >
+            保存设置
+          </button>
+        </div>
+      </div>
+
       <!-- 欢迎页 -->
       <div v-if="!started" class="bg-white rounded-lg shadow-lg p-8 text-center">
         <h2 class="text-2xl font-bold mb-4">欢迎参加MBTI深度测试</h2>
@@ -29,6 +71,9 @@
           <p>预计完成时间：<strong>60-90分钟</strong></p>
           <p class="text-sm text-amber-600 mt-4">
             ⚠️ 请确保有足够的时间，可以随时保存进度
+          </p>
+          <p class="text-sm text-blue-600 mt-2">
+            💡 提示：评估需要OpenAI API密钥，请点击"设置"按钮配置
           </p>
         </div>
         <div class="flex gap-4 justify-center">
@@ -241,9 +286,8 @@
 <script setup>
 import { ref, computed, onMounted } from 'vue'
 import { useRouter } from 'vue-router'
-import axios from 'axios'
-
-const API_BASE = import.meta.env.VITE_API_BASE || 'http://localhost:8000'
+import MBTIEvaluator from './evaluator.js'
+import questionsData from '../public/mbti_93_questions.json'
 
 const router = useRouter()
 
@@ -256,7 +300,11 @@ const answers = ref({})
 const results = ref(null)
 const message = ref('')
 const showRawData = ref(false)
-const isAdminMode = ref(false)
+const showApiSettings = ref(false)
+const apiKey = ref('')
+const apiBase = ref('https://api.deepseek.com')
+const apiModel = ref('deepseek-chat')
+const evaluator = ref(null)
 
 // 计算属性
 const totalQuestions = ref(93)
@@ -280,15 +328,10 @@ const evaluatedCount = computed(() => {
 })
 
 // 方法
-async function startTest() {
-  try {
-    const res = await axios.get(`${API_BASE}/questions?offset=0&limit=93`)
-    questions.value = res.data.questions
-    started.value = true
-    saveProgress()
-  } catch (err) {
-    showMessage('加载题目失败: ' + err.message)
-  }
+function startTest() {
+  questions.value = questionsData.questions
+  started.value = true
+  saveProgress()
 }
 
 function continueTest() {
@@ -319,23 +362,66 @@ function prevQuestion() {
 async function submitAll() {
   if (!canSubmit.value) return
 
+  // 检查API密钥
+  if (!apiKey.value) {
+    showMessage('请先配置API密钥')
+    showApiSettings.value = true
+    return
+  }
+
   evaluating.value = true
   try {
-    // 创建或获取会话
-    const sessionRes = await axios.post(`${API_BASE}/session/start`)
-    const sessionId = sessionRes.data.session_id
+    // 初始化评估器
+    evaluator.value = new MBTIEvaluator()
+    evaluator.value.apiKey = apiKey.value
+    evaluator.value.baseUrl = apiBase.value
+    evaluator.value.model = apiModel.value
 
-    // 提交所有答案
-    for (const [qid, answer] of Object.entries(answers.value)) {
-      await axios.post(`${API_BASE}/session/${sessionId}/answer`, {
-        question_id: qid,
-        answer: answer
-      })
+    // 保存API设置
+    localStorage.setItem('openai_api_key', apiKey.value)
+    localStorage.setItem('openai_api_base', apiBase.value)
+    localStorage.setItem('openai_api_model', apiModel.value)
+
+    // 评估所有题目
+    const assessments = []
+    for (const question of questions.value) {
+      const answer = answers.value[question.id]
+      if (answer) {
+        const assessment = await evaluator.value.evaluateSingleQuestion(question, answer)
+        assessments.push(assessment)
+      }
     }
 
-    // 触发评估
-    const evalRes = await axios.post(`${API_BASE}/session/${sessionId}/evaluate`)
-    results.value = evalRes.data
+    // 计算维度得分
+    const dimensionData = { EI: [], SN: [], TF: [], JP: [] }
+    assessments.forEach(a => {
+      if (dimensionData[a.dimension]) {
+        dimensionData[a.dimension].push([a.score, a.confidence])
+      }
+    })
+
+    const dimensionScores = {}
+    ;['EI', 'SN', 'TF', 'JP'].forEach(dim => {
+      const scores = dimensionData[dim]
+      if (scores.length > 0) {
+        const weightedSum = scores.reduce((sum, [s, c]) => sum + s * c, 0)
+        const totalWeight = scores.reduce((sum, [, c]) => sum + c, 0)
+        dimensionScores[dim] = totalWeight > 0 ? weightedSum / totalWeight : 5
+      } else {
+        dimensionScores[dim] = 5
+      }
+    })
+
+    // 生成最终报告
+    const report = await evaluator.value.generateFinalReport(assessments, dimensionScores)
+
+    results.value = {
+      mbti_type: evaluator.value.scoresToType(dimensionScores),
+      dimension_scores: dimensionScores,
+      assessments: assessments,
+      report: report
+    }
+
     completed.value = true
     evaluating.value = false
 
@@ -343,14 +429,14 @@ async function submitAll() {
     localStorage.removeItem('mbti_answers')
   } catch (err) {
     evaluating.value = false
-    showMessage('评估失败: ' + (err.response?.data?.detail || err.message))
+    console.error('评估失败:', err)
+    showMessage('评估失败: ' + (err.message || '未知错误'))
   }
 }
 
 function saveAndExit() {
   saveProgress()
   showMessage('进度已保存，可以随时回来继续')
-  setTimeout(() => window.close(), 1000)
 }
 
 function saveProgress() {
@@ -371,7 +457,8 @@ function loadProgress() {
 }
 
 function goToAdmin() {
-  router.push('/admin')
+  // Admin functionality removed in static version
+  showMessage('管理面板在此版本中不可用')
 }
 
 function shareResults() {
@@ -449,6 +536,14 @@ function getRightAnchor(dim) {
   return anchors[dim]
 }
 
+function saveApiSettings() {
+  localStorage.setItem('openai_api_key', apiKey.value)
+  localStorage.setItem('openai_api_base', apiBase.value)
+  localStorage.setItem('openai_api_model', apiModel.value)
+  showMessage('API设置已保存')
+  showApiSettings.value = false
+}
+
 function showMessage(msg) {
   message.value = msg
   setTimeout(() => {
@@ -457,18 +552,18 @@ function showMessage(msg) {
 }
 
 onMounted(async () => {
-  try {
-    // 加载题目
-    const res = await axios.get(`${API_BASE}/questions?offset=0&limit=93`)
-    questions.value = res.data.questions
-    totalQuestions.value = questions.value.length
+  // 加载题目
+  questions.value = questionsData.questions
+  totalQuestions.value = questions.value.length
 
-    // 加载进度
-    if (loadProgress()) {
-      hasSavedProgress.value = true
-    }
-  } catch (err) {
-    showMessage('初始化失败: ' + err.message)
+  // 加载进度
+  if (loadProgress()) {
+    hasSavedProgress.value = true
   }
+
+  // 加载API设置
+  apiKey.value = localStorage.getItem('openai_api_key') || ''
+  apiBase.value = localStorage.getItem('openai_api_base') || 'https://api.deepseek.com'
+  apiModel.value = localStorage.getItem('openai_api_model') || 'deepseek-chat'
 })
 </script>
