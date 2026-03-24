@@ -241,13 +241,11 @@
 <script setup>
 import { ref, computed, onMounted } from 'vue'
 import { useRouter } from 'vue-router'
-import { useStore } from 'pinia'
 import axios from 'axios'
 
 const API_BASE = import.meta.env.VITE_API_BASE || 'http://localhost:8000'
 
 const router = useRouter()
-const store = useStore()
 
 // 响应式数据
 const started = ref(false)
